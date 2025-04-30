@@ -1,1 +1,6 @@
-train*
+__pycache__/
+birdclef-2025/
+archive/
+*.png
+*.svg
+*.pth
