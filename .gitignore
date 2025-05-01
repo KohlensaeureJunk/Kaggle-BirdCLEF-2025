@@ -4,3 +4,5 @@ archive/
 *.png
 *.svg
 *.pth
+.vscode/settings.json
+test_gpu.ipynb
