@@ -6,3 +6,4 @@ archive/
 *.pth
 .vscode/settings.json
 test_gpu.ipynb
+*.json
