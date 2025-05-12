@@ -1,3 +1,9 @@
+import numpy as np
+import librosa
+import time, math
+from tqdm.auto import tqdm
+import cv2
+
 def audio2melspec(audio_data, cfg):
     """Convert audio data to mel spectrogram"""
     if np.isnan(audio_data).any():
