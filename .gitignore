@@ -7,3 +7,4 @@ archive/
 .vscode/settings.json
 test_gpu.ipynb
 *.json
+*.csv
