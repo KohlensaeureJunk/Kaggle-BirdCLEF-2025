@@ -8,3 +8,4 @@ archive/
 test_gpu.ipynb
 *.json
 *.csv
+*.Identifier
