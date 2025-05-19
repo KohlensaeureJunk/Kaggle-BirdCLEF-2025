@@ -227,27 +227,25 @@ def compile_model(model, cfg):
     try:
         compiled_model = torch.compile(
             model, 
-            backend="inductor",
+            backend=cfg.compile_backend,
             mode=cfg.compile_mode,
             fullgraph=False  # Set to False for better compatibility
         )
-        print(f"Model compiled successfully with mode: {cfg.compile_mode}")
+        print(f"Model compiled successfully with backend '{cfg.compile_backend}', mode '{cfg.compile_mode}'")
         return compiled_model
     except Exception as e:
         print(f"Model compilation failed: {e}")
-        if cfg.compile_fallback:
-            try:
-                # Try with a more conservative mode
-                compiled_model = torch.compile(
-                    model,
-                    backend="inductor",
-                    mode="reduce-overhead",
-                    fullgraph=False
-                )
-                print("Model compiled with fallback mode: reduce-overhead")
-                return compiled_model
-            except Exception as e2:
-                print(f"Fallback compilation also failed: {e2}")
-                print("Using non-compiled model")
-                return model
-        return model
+        try:
+            # Try with a more conservative mode
+            compiled_model = torch.compile(
+                model,
+                backend="eager",
+                mode="reduce-overhead",
+                fullgraph=False
+            )
+            print("Model compiled with fallback backend eager, mode: reduce-overhead")
+            return compiled_model
+        except Exception as e2:
+            print(f"Fallback compilation also failed: {e2}")
+            print("Using non-compiled model")
+            return model
