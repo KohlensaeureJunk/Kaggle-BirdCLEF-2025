@@ -1,37 +1,12 @@
-import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
-import math
 import gc 
 import numpy as np
 from torch.optim.lr_scheduler import _LRScheduler
-from sklearn.metrics import roc_auc_score
-
-def get_optimizer(model, cfg):
-    if cfg.optimizer == 'Adam':
-        optimizer = optim.Adam(
-            model.parameters(),
-            lr=cfg.lr,
-            weight_decay=cfg.weight_decay
-        )
-    elif cfg.optimizer == 'AdamW':
-        optimizer = optim.AdamW(
-            model.parameters(),
-            lr=cfg.lr,
-            weight_decay=cfg.weight_decay
-        )
-    elif cfg.optimizer == 'SGD':
-        optimizer = optim.SGD(
-            model.parameters(),
-            lr=cfg.lr,
-            momentum=0.9,
-            weight_decay=cfg.weight_decay
-        )
-    else:
-        raise NotImplementedError(f"Optimizer {cfg.optimizer} not implemented") 
-    return optimizer
+from sklearn.metrics import roc_auc_score, roc_curve
+from scipy import interpolate
 
 def get_scheduler(optimizer, cfg, steps=None):
     if cfg.scheduler == 'CosineAnnealingLR':
@@ -196,27 +171,155 @@ def clean_gpu_memory():
     # Force garbage collection multiple times
     for _ in range(3):
         gc.collect()
-    
-    # Print memory stats if available
-    if torch.cuda.is_available():
-        for i in range(torch.cuda.device_count()):
-            total_memory = torch.cuda.get_device_properties(i).total_memory / 1e9
-            allocated = torch.cuda.memory_allocated(i) / 1e9
-            reserved = torch.cuda.memory_reserved(i) / 1e9
-            free = total_memory - reserved
-            
-            print(f"GPU {i} Memory: Total {total_memory:.2f}GB | "
-                  f"Reserved {reserved:.2f}GB | Allocated {allocated:.2f}GB | Free {free:.2f}GB")
 
-def calculate_auc(targets, probs):
-    aucs = []
+
+def calculate_soft_label_metrics(y_true, y_pred):
+    """Calculate comprehensive metrics for soft label multi-label classification
     
-    for i in range(targets.shape[1]):
-        if np.sum(targets[:, i]) > 0:
-            class_auc = roc_auc_score(targets[:, i], probs[:, i])
-            aucs.append(class_auc)
+    Args:
+        y_true: True labels (can be soft labels between 0 and 1) 
+        y_pred: Predicted probabilities
+    """
+    metrics = {}
     
-    return np.mean(aucs) if aucs else 0.0
+    # Check for and handle NaN values
+    if np.isnan(y_pred).any():
+        print("Warning: NaN values detected in predictions. Replacing with zeros.")
+        y_pred = np.nan_to_num(y_pred, nan=0.0)
+    
+    # Per-class AUCs for analysis
+    class_aucs = []
+    valid_classes = 0
+    
+    for class_idx in range(y_true.shape[1]):
+        class_true = y_true[:, class_idx]
+        class_pred = y_pred[:, class_idx]
+        
+        # Check for variation in true labels
+        if np.var(class_true) > 0:
+            try:
+                # to calculate AUC, we first assume all labels are true
+                # then we assume that all are false
+                y_true_hard = np.concatenate((np.ones(class_true.shape), np.zeros(class_true.shape)))
+                sample_weight = np.concatenate((class_true, 1-class_true))
+                y_pred_twice = np.concatenate((class_pred, class_pred))
+                
+                auc_score = roc_auc_score(y_true_hard, y_pred_twice, sample_weight=sample_weight)
+                class_aucs.append(auc_score)
+                valid_classes += 1
+            except Exception as e:
+                print(f"Error calculating AUC for class {class_idx}: {e}")
+                class_aucs.append(0.5)  # Default to random performance
+        else:
+            # If no variation, AUC is undefined - use 0.5 (random performance)
+            class_aucs.append(0.5)
+    
+    metrics['macro_auc'] = np.mean(class_aucs)
+    metrics['valid_classes'] = valid_classes
+    
+    return metrics
+
+def macro_soft_roc_curve(y_true_soft, y_score, num_points=100):
+    """
+    Computes the macro-averaged ROC curve for multiclass soft labels.
+    
+    Parameters:
+        y_true_soft: np.ndarray, shape (n_samples, n_classes)
+            Soft ground truth labels (should sum to 1 per row).
+        y_score: np.ndarray, shape (n_samples, n_classes)
+            Predicted probabilities per class.
+        num_points: int
+            Number of FPR points to interpolate over (shared grid).
+    
+    Returns:
+        fpr_grid: np.ndarray, shape (num_points,)
+        mean_tpr: np.ndarray, shape (num_points,)
+    """
+    # Handle NaN values in predictions
+    if np.isnan(y_score).any():
+        print("Warning: NaN values detected in ROC curve calculation. Replacing with zeros.")
+        y_score = np.nan_to_num(y_score, nan=0.0)
+    
+    # Handle NaN values in targets
+    if np.isnan(y_true_soft).any():
+        print("Warning: NaN values in targets detected. Replacing with zeros.")
+        y_true_soft = np.nan_to_num(y_true_soft, nan=0.0)
+    
+    n_classes = y_true_soft.shape[1]
+    fpr_grid = np.linspace(0, 1, num_points)
+    all_tprs = []
+    valid_classes = 0
+
+    for i in range(n_classes):
+        y_t = y_true_soft[:, i]
+        y_s = y_score[:, i]
+        
+        try:
+            y_true_bin = []
+            y_score_bin = []
+            sample_weight = []
+
+            for yt, ys in zip(y_t, y_s):
+                if yt > 0:
+                    y_true_bin.append(1)
+                    y_score_bin.append(ys)
+                    sample_weight.append(yt)
+                if yt < 1:
+                    y_true_bin.append(0)
+                    y_score_bin.append(ys)
+                    sample_weight.append(1 - yt)
+
+            y_true_bin = np.array(y_true_bin)
+            y_score_bin = np.array(y_score_bin)
+            sample_weight = np.array(sample_weight)
+            
+            # Skip if insufficient data
+            if len(y_true_bin) == 0 or len(np.unique(y_true_bin)) < 2:
+                continue
+
+            fpr, tpr, _ = roc_curve(y_true_bin, y_score_bin, sample_weight=sample_weight)
+            
+            # Skip if not enough points for interpolation
+            if len(fpr) < 2:
+                continue
+
+            # Make sure fpr is sorted for interpolation
+            sort_idx = np.argsort(fpr)
+            fpr = fpr[sort_idx]
+            tpr = tpr[sort_idx]
+
+            # Interpolate TPR to the common FPR grid
+            # Add explicit points at 0 and 1 if they don't exist
+            if fpr[0] > 0:
+                fpr = np.concatenate([[0], fpr])
+                tpr = np.concatenate([[0], tpr])
+            if fpr[-1] < 1:
+                fpr = np.concatenate([fpr, [1]])
+                tpr = np.concatenate([tpr, [1]])
+                
+            interp_tpr = interpolate.interp1d(fpr, tpr, bounds_error=False, fill_value=(0, 1))
+            interpolated_tpr = interp_tpr(fpr_grid)
+            all_tprs.append(interpolated_tpr)
+            valid_classes += 1
+        except Exception as e:
+            print(f"Error calculating ROC curve for class {i}: {e}")
+            continue
+
+    # If no valid curves, return a diagonal line (random classifier)
+    if len(all_tprs) == 0:
+        print(f"Warning: No valid ROC curves could be calculated out of {n_classes} classes. Returning diagonal line.")
+        return fpr_grid, fpr_grid
+        
+    # Convert to array and calculate mean
+    all_tprs = np.array(all_tprs)
+    mean_tpr = np.mean(all_tprs, axis=0)
+    
+    # Ensure mean_tpr starts at 0 and ends at 1
+    mean_tpr[0] = 0.0
+    mean_tpr[-1] = 1.0
+    
+    return fpr_grid, mean_tpr
+
 
 def compile_model(model, cfg):
     """Safely compile the model with fallback options"""
@@ -229,7 +332,7 @@ def compile_model(model, cfg):
             model, 
             backend=cfg.compile_backend,
             mode=cfg.compile_mode,
-            fullgraph=False  # Set to False for better compatibility
+            fullgraph=True  # Set to False for better compatibility
         )
         print(f"Model compiled successfully with backend '{cfg.compile_backend}', mode '{cfg.compile_mode}'")
         return compiled_model
