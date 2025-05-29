@@ -1,6 +1,8 @@
 __pycache__/
 birdclef-2025/
 archive/
+.venv/
+.vscode/
 *.png
 *.svg
 *.pth
