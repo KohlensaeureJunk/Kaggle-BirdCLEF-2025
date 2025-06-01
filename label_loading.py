@@ -1,12 +1,117 @@
 import numpy as np
 import pandas as pd
 import random
+import os
+import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 
-def load_training_labels(train_df, ext_df, cfg, random_state=cfg.seed):
+def filter_training_labels(train_df, ext_df, cfg, random_state=None):
+    """
+    Filter training labels by selecting the 5-second segment with highest confidence for each file.
+    
+    For each entry in train_df:
+    1. Find all corresponding 5-second samples in ext_df
+    2. Select the one with highest probability for the primary label
+    3. Keep secondary labels only if they have sufficient probability in the chosen 5s segment
+    """
+    if random_state is None: 
+        random_state = cfg.seed
+    
+    # Group ext_df by samplename (filename without extension)
+    ext_df['samplename'] = ext_df['row_id'].apply(lambda x: x.split('_')[0])
+    
+    # Create a lookup for faster access
+    ext_grouped = ext_df.groupby('samplename')
+    
+    return_list = []
+    
+    for _, train_row in tqdm(train_df.iterrows(), desc="Filtering training data", total=len(train_df)):
+        # Extract samplename from the full filename
+        samplename = train_row['filename'].split('/')[-1].split('.')[0]
+        
+        # Get primary label and secondary labels
+        primary_label = train_row['primary_label']
+        secondary_labels = train_row['secondary_labels']
+        
+        # Process secondary labels
+        if secondary_labels not in [[''], None, np.nan, [], "['']", "[]"]:
+            if isinstance(secondary_labels, str):
+                try:
+                    secondary_labels = eval(secondary_labels)
+                except:
+                    secondary_labels = [secondary_labels]
+        else:
+            secondary_labels = []
+                
+        # Skip if no corresponding entries in ext_df
+        if samplename not in ext_grouped.groups:
+            print(f"Warning: {samplename} not found in external dataframe, instead applying exisiting labels")
+            timestamp = "5" # first 5 second always exist
+            retained_secondaries = secondary_labels
+        else:
+            # Get all 5-second segments for this sample
+            segments = ext_grouped.get_group(samplename)
+                
+            # Find segment with highest probability for primary label
+            segments_with_probs = segments.copy()
+            segments_with_probs['primary_prob'] = segments_with_probs[primary_label]
+            best_segment = segments_with_probs.loc[segments_with_probs['primary_prob'].idxmax()]
+            
+            # Skip if confidence for primary label is too low
+            if best_segment['primary_prob'] < cfg.train_label_confidence:
+                continue
+                
+            # Filter secondary labels based on their confidence in the best segment
+            retained_secondaries = []
+            for sec_label in secondary_labels:
+                if sec_label in segments.columns[1:] and best_segment[sec_label] >= cfg.secondary_label_confidence:
+                    retained_secondaries.append(sec_label)
+            
+            # Extract timestamp from row_id
+            timestamp = best_segment['row_id'].split('_')[1]
+        
+        # Add the filtered entry to our results
+        return_list.append({
+            "samplename": samplename + "_" + timestamp,
+            "primary_label": primary_label,
+            "secondary_labels": str(retained_secondaries),
+            "filename": samplename + ".ogg",
+            "filepath": os.path.join(cfg.train_datadir, samplename + ".ogg"),
+            "timestamp": timestamp,
+        })
+    
+    result_df = pd.DataFrame(return_list)
+            
+    # Group by primary_label and calculate proportions for plotting
+    label_counts = result_df['primary_label'].value_counts()
+    
+    # Create visualization of label distribution
+    plt.figure(figsize=(10, max(8, len(label_counts)*0.1)))  # Dynamic height based on label count
+    plt.barh(label_counts.index, label_counts.values, color='skyblue')
+    plt.title('Distribution of Bird Species Labels')
+    plt.xlabel('Number of Samples')
+    plt.xscale('log')
+    plt.ylabel('Bird Species')
+    plt.grid(axis='x', linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    # Save the plot if output directory exists in config
+    if hasattr(cfg, 'OUTPUT_DIR') and os.path.exists(cfg.OUTPUT_DIR):
+        plt.savefig(os.path.join(cfg.OUTPUT_DIR, f'plots/label_distribution_{cfg.timestamp}.png'))
+    plt.show()
+
+    # shuffle the final DataFrame
+    result_df = result_df.sample(frac=1, random_state=random_state).reset_index(drop=True)
+    print(f"Returning {len(result_df)} processed filtered labels")
+    return result_df
+
+
+def load_training_labels(train_df, ext_df, cfg, random_state=None):
     """
     Compare training labels with external pseudolabels and filter based on confidence threshold.
     """
+    if random_state is None:
+        random_state = cfg.seed
     # Create lookup dictionaries to avoid repeated dataframe filtering
     filename_to_primary = {}
     filename_to_secondary = {}
@@ -25,7 +130,7 @@ def load_training_labels(train_df, ext_df, cfg, random_state=cfg.seed):
         
         # Normalize predictions in one step
         predictions = ext_row[1:]
-        predictions = predictions / predictions.sum()
+        #predictions = predictions / predictions.sum()
         
         # Get predictions above threshold with a single operation
         passed_preds = predictions[predictions > cfg.train_label_confidence]
@@ -61,8 +166,8 @@ def load_training_labels(train_df, ext_df, cfg, random_state=cfg.seed):
                 if secondaries_filtered:
                     primary_label = secondaries_filtered[0]
                     secondaries_filtered = secondaries_filtered[1:]
-                else:
-                    primary_label = passed_preds.index[0]
+                #else:
+                #    primary_label = passed_preds.index[0]
         else:
             if secondaries_filtered:
                 primary_label = secondaries_filtered[0]
@@ -87,6 +192,20 @@ def load_training_labels(train_df, ext_df, cfg, random_state=cfg.seed):
             
             # Group by primary_label and calculate proportions
             label_counts = result_df['primary_label'].value_counts()
+            
+            # Create visualization of label distribution
+            plt.figure(figsize=(10, max(8, len(label_counts)*0.25)))  # Dynamic height based on label count
+            plt.barh(label_counts.index, label_counts.values, color='skyblue')
+            plt.title('Distribution of Bird Species Labels')
+            plt.xlabel('Number of Samples')
+            plt.ylabel('Bird Species')
+            plt.grid(axis='x', linestyle='--', alpha=0.7)
+            plt.tight_layout()
+            # Save the plot if output directory exists in config
+            if hasattr(cfg, 'OUTPUT_DIR') and os.path.exists(cfg.OUTPUT_DIR):
+                plt.savefig(os.path.join(cfg.OUTPUT_DIR, f'plots/label_distribution_{cfg.timestamp}.png'))
+            plt.show()
+            
             label_proportions = label_counts / len(result_df)
             
             # Calculate how many samples to take from each group
@@ -108,6 +227,8 @@ def load_training_labels(train_df, ext_df, cfg, random_state=cfg.seed):
             print(f"Randomly sampling {cfg.max_train_samples} samples")
             result_df = result_df.sample(cfg.max_train_samples, random_state=random_state).reset_index(drop=True)
     
+    # shuffle the final DataFrame
+    result_df = result_df.sample(frac=1, random_state=random_state).reset_index(drop=True)
     print(f"Returning {len(result_df)} processed pseudolabels")
     return result_df
 

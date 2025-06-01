@@ -7,6 +7,7 @@ import numpy as np
 from torch.optim.lr_scheduler import _LRScheduler
 from sklearn.metrics import roc_auc_score, roc_curve
 from scipy import interpolate
+import time
 
 def get_scheduler(optimizer, cfg, steps=None):
     if cfg.scheduler == 'CosineAnnealingLR':
@@ -153,10 +154,12 @@ class GradualWarmupScheduler(_LRScheduler):
         else:
             return super(GradualWarmupScheduler, self).step(epoch)
         
-def clean_gpu_memory():
+def clean_gpu_memory(cfg):
     """
     Thoroughly cleans GPU memory to prevent CUDA out-of-memory errors between folds
     """
+    torch._dynamo.reset()
+    
     # Delete all tensors from GPU memory
     for obj in gc.get_objects():
         try:
@@ -165,12 +168,22 @@ def clean_gpu_memory():
         except:
             pass
     
-    # Clear CUDA cache
-    torch.cuda.empty_cache()
-    
     # Force garbage collection multiple times
     for _ in range(3):
         gc.collect()
+    
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(cfg.seed)
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        # On some systems, this might help further
+        try:
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.reset_max_memory_allocated()
+        except:
+            pass
+
+    time.sleep(1)  # Give time for CUDA to release memory
 
 
 def calculate_soft_label_metrics(y_true, y_pred):
@@ -321,6 +334,122 @@ def macro_soft_roc_curve(y_true_soft, y_score, num_points=100):
     return fpr_grid, mean_tpr
 
 
+def calculate_hard_label_metrics(y_true, y_pred):
+    """Calculate comprehensive metrics for binary hard label multi-label classification
+    
+    Args:
+        y_true: True binary labels (0s and 1s)
+        y_pred: Predicted probabilities
+    """
+    metrics = {}
+    
+    # Check for and handle NaN values
+    if np.isnan(y_pred).any():
+        print("Warning: NaN values detected in predictions. Replacing with zeros.")
+        y_pred = np.nan_to_num(y_pred, nan=0.0)
+    
+    # Per-class AUCs for analysis
+    class_aucs = []
+    valid_classes = 0
+    
+    for class_idx in range(y_true.shape[1]):
+        class_true = y_true[:, class_idx]
+        class_pred = y_pred[:, class_idx]
+        
+        # Check if class exists in dataset
+        if np.any(class_true > 0) and np.any(class_true < 1):
+            try:
+                auc_score = roc_auc_score(class_true, class_pred)
+                class_aucs.append(auc_score)
+                valid_classes += 1
+            except Exception as e:
+                print(f"Error calculating AUC for class {class_idx}: {e}")
+    
+    metrics['macro_auc'] = np.mean(class_aucs)
+    metrics['valid_classes'] = valid_classes
+    
+    return metrics
+
+
+def macro_hard_roc_curve(y_true, y_score, num_points=100):
+    """
+    Computes the macro-averaged ROC curve for multiclass hard (binary) labels.
+    
+    Parameters:
+        y_true: np.ndarray, shape (n_samples, n_classes)
+            Binary ground truth labels (0s and 1s).
+        y_score: np.ndarray, shape (n_samples, n_classes)
+            Predicted probabilities per class.
+        num_points: int
+            Number of FPR points to interpolate over (shared grid).
+    
+    Returns:
+        fpr_grid: np.ndarray, shape (num_points,)
+        mean_tpr: np.ndarray, shape (num_points,)
+    """
+    # Handle NaN values in predictions
+    if np.isnan(y_score).any():
+        print("Warning: NaN values detected in ROC curve calculation. Replacing with zeros.")
+        y_score = np.nan_to_num(y_score, nan=0.0)
+    
+    n_classes = y_true.shape[1]
+    fpr_grid = np.linspace(0, 1, num_points)
+    all_tprs = []
+    valid_classes = 0
+
+    for i in range(n_classes):
+        y_t = y_true[:, i]
+        y_s = y_score[:, i]
+        
+        try:
+            # Skip if insufficient data
+            if len(np.unique(y_t)) < 2:
+                continue
+
+            fpr, tpr, _ = roc_curve(y_t, y_s)
+            
+            # Skip if not enough points for interpolation
+            if len(fpr) < 2:
+                continue
+
+            # Make sure fpr is sorted for interpolation
+            sort_idx = np.argsort(fpr)
+            fpr = fpr[sort_idx]
+            tpr = tpr[sort_idx]
+
+            # Interpolate TPR to the common FPR grid
+            # Add explicit points at 0 and 1 if they don't exist
+            if fpr[0] > 0:
+                fpr = np.concatenate([[0], fpr])
+                tpr = np.concatenate([[0], tpr])
+            if fpr[-1] < 1:
+                fpr = np.concatenate([fpr, [1]])
+                tpr = np.concatenate([tpr, [1]])
+                
+            interp_tpr = interpolate.interp1d(fpr, tpr, bounds_error=False, fill_value=(0, 1))
+            interpolated_tpr = interp_tpr(fpr_grid)
+            all_tprs.append(interpolated_tpr)
+            valid_classes += 1
+        except Exception as e:
+            print(f"Error calculating ROC curve for class {i}: {e}")
+            continue
+
+    # If no valid curves, return a diagonal line (random classifier)
+    if len(all_tprs) == 0:
+        print(f"Warning: No valid ROC curves could be calculated out of {n_classes} classes. Returning diagonal line.")
+        return fpr_grid, fpr_grid
+        
+    # Convert to array and calculate mean
+    all_tprs = np.array(all_tprs)
+    mean_tpr = np.mean(all_tprs, axis=0)
+    
+    # Ensure mean_tpr starts at 0 and ends at 1
+    mean_tpr[0] = 0.0
+    mean_tpr[-1] = 1.0
+    
+    return fpr_grid, mean_tpr
+
+
 def compile_model(model, cfg):
     """Safely compile the model with fallback options"""
     if not torch.cuda.is_available():
@@ -332,7 +461,7 @@ def compile_model(model, cfg):
             model, 
             backend=cfg.compile_backend,
             mode=cfg.compile_mode,
-            fullgraph=True  # Set to False for better compatibility
+            fullgraph=False  # Set to False for better compatibility
         )
         print(f"Model compiled successfully with backend '{cfg.compile_backend}', mode '{cfg.compile_mode}'")
         return compiled_model
