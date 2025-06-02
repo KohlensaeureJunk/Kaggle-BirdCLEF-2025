@@ -82,23 +82,6 @@ def filter_training_labels(train_df, ext_df, cfg, random_state=None):
         })
     
     result_df = pd.DataFrame(return_list)
-            
-    # Group by primary_label and calculate proportions for plotting
-    label_counts = result_df['primary_label'].value_counts()
-    
-    # Create visualization of label distribution
-    plt.figure(figsize=(10, max(8, len(label_counts)*0.1)))  # Dynamic height based on label count
-    plt.barh(label_counts.index, label_counts.values, color='skyblue')
-    plt.title('Distribution of Bird Species Labels')
-    plt.xlabel('Number of Samples')
-    plt.xscale('log')
-    plt.ylabel('Bird Species')
-    plt.grid(axis='x', linestyle='--', alpha=0.7)
-    plt.tight_layout()
-    # Save the plot if output directory exists in config
-    if hasattr(cfg, 'OUTPUT_DIR') and os.path.exists(cfg.OUTPUT_DIR):
-        plt.savefig(os.path.join(cfg.OUTPUT_DIR, f'plots/label_distribution_{cfg.timestamp}.png'))
-    plt.show()
 
     # shuffle the final DataFrame
     result_df = result_df.sample(frac=1, random_state=random_state).reset_index(drop=True)
@@ -300,7 +283,6 @@ def load_pseudolabels(df, cfg, seed=None):
         
         # Shuffle labels for randomness across folds
         shuffled_labels = list(label_to_samples.keys())
-        random.seed(random_seed)
         random.shuffle(shuffled_labels)
         
         # Sample entries for each label
@@ -327,10 +309,9 @@ def load_pseudolabels(df, cfg, seed=None):
     else:
         print(f"Using randomly selected {cfg.max_pseudolabels} pseudolabels that pass confidence threshold")
     
-    # Step 3: Convert to training-compatible DataFrame format
-    # First, create a dataframe just with the row_ids we need
     rows_to_keep = random.sample(list(valid_samples.keys()), min(cfg.max_pseudolabels, len(valid_samples)))
 
+    # Step 3: Convert to training-compatible DataFrame format
     label_df = pd.DataFrame({
         'samplename': rows_to_keep,
         'filename': [f"{'_'.join(x.split('_')[:3])}.ogg" for x in rows_to_keep],

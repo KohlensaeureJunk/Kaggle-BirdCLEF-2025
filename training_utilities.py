@@ -8,6 +8,8 @@ from torch.optim.lr_scheduler import _LRScheduler
 from sklearn.metrics import roc_auc_score, roc_curve
 from scipy import interpolate
 import time
+from sklearn.model_selection import GroupKFold, StratifiedKFold
+from sklearn.utils import shuffle
 
 def get_scheduler(optimizer, cfg, steps=None):
     if cfg.scheduler == 'CosineAnnealingLR':
@@ -481,3 +483,115 @@ def compile_model(model, cfg):
             print(f"Fallback compilation also failed: {e2}")
             print("Using non-compiled model")
             return model
+        
+
+def get_improved_folds(df, cfg):
+    """Create truly balanced folds ensuring rare classes are evenly distributed"""
+    
+    # Get label distribution
+    label_counts = df['primary_label'].value_counts()
+    
+    # Separate extremely rare (<=n_fold), rare (<=20), and common classes
+    extremely_rare_classes = label_counts[label_counts <= cfg.n_fold].index.tolist()
+    rare_classes = label_counts[(label_counts > cfg.n_fold) & (label_counts <= 20)].index.tolist()
+    common_classes = label_counts[label_counts > 20].index.tolist()
+    
+    print(f"Class distribution: {len(extremely_rare_classes)} extremely rare, {len(rare_classes)} rare, {len(common_classes)} common")
+    
+    # Initialize fold indices
+    fold_train_indices = [[] for _ in range(cfg.n_fold)]
+    fold_val_indices = [[] for _ in range(cfg.n_fold)]
+    
+    # STEP 1: Handle extremely rare classes - distribute one sample per fold using round robin
+    # Keep track of the next fold to use across all rare classes
+    next_fold_idx = 0
+    
+    # Sort extremely rare classes to ensure consistent distribution across runs
+    extremely_rare_classes = sorted(extremely_rare_classes)
+    
+    for cls in extremely_rare_classes:
+        # Get indices for this class
+        class_indices = df[df['primary_label'] == cls].index.tolist()
+        n_samples = len(class_indices)
+        
+        # Shuffle to randomize which samples go to which folds
+        np.random.shuffle(class_indices)
+        
+        # Distribute one sample per fold, continuing from last position
+        for i, idx in enumerate(class_indices):
+            fold_val_indices[next_fold_idx].append(idx)
+            next_fold_idx = (next_fold_idx + 1) % cfg.n_fold
+    
+    # STEP 2: Handle rare classes - distribute using stratification but with special care
+    # Sort rare classes as well for consistency
+    rare_classes = sorted(rare_classes)
+    
+    for cls in rare_classes:
+        # Get indices for this class
+        class_indices = df[df['primary_label'] == cls].index.tolist()
+        n_samples = len(class_indices)
+        
+        # Shuffle to randomize
+        np.random.shuffle(class_indices)
+        
+        # Calculate how many samples per fold (approximately equal)
+        base_samples_per_fold = n_samples // cfg.n_fold
+        extra_samples = n_samples % cfg.n_fold
+        
+        # Distribute samples among folds
+        start_idx = 0
+        for fold_idx in range(cfg.n_fold):
+            # Add extra sample for some folds to distribute remainder
+            fold_size = base_samples_per_fold + (1 if fold_idx < extra_samples else 0)
+            end_idx = start_idx + fold_size
+            
+            # Add validation samples for this fold
+            fold_val_indices[fold_idx].extend(class_indices[start_idx:end_idx])
+            start_idx = end_idx
+    
+    # STEP 3: Handle common classes using stratified k-fold
+    # Create a filtered dataframe with only common classes
+    common_df = df[df['primary_label'].isin(common_classes)].copy()
+    if len(common_df) > 0:
+        skf = StratifiedKFold(n_splits=cfg.n_fold, shuffle=True, random_state=cfg.seed)
+        common_folds = list(skf.split(common_df, common_df['primary_label']))
+        
+        # Add these indices to our existing folds
+        for fold_idx, (_, val_idx) in enumerate(common_folds):
+            # Map back to original dataframe indices
+            original_val_indices = common_df.iloc[val_idx].index.tolist()
+            fold_val_indices[fold_idx].extend(original_val_indices)
+    
+    # STEP 4: Create the final train/val indices
+    final_folds = []
+    all_indices = set(df.index.tolist())
+    
+    for fold_idx in range(cfg.n_fold):
+        # Convert to sets for efficient operations
+        val_indices = set(fold_val_indices[fold_idx])
+        train_indices = all_indices - val_indices
+        
+        # Convert back to sorted lists and store
+        final_folds.append((
+            np.array(sorted(list(train_indices))),
+            np.array(sorted(list(val_indices)))
+        ))
+    
+    # Verify the distribution
+    validation_distribution = {}
+    for fold_idx, (_, val_idx) in enumerate(final_folds):
+        val_df = df.iloc[val_idx]
+        classes = val_df['primary_label'].value_counts()
+        for cls, count in classes.items():
+            if cls not in validation_distribution:
+                validation_distribution[cls] = [0] * cfg.n_fold
+            validation_distribution[cls][fold_idx] = count
+    
+    # Report on extremely rare class distribution
+    print("\nExtremely rare class distribution across validation folds:")
+    for cls in extremely_rare_classes:
+        if cls in validation_distribution:
+            dist = validation_distribution[cls]
+            print(f"  Class '{cls}' (total: {sum(dist)}): {dist}")
+    
+    return final_folds

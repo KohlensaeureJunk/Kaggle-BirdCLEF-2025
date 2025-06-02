@@ -4,6 +4,16 @@ import time, math
 from tqdm.auto import tqdm
 import cv2
 
+"""
+## Pre-processing
+These functions handle the transformation of audio files to mel spectrograms for model input,
+with flexibility controlled by the `LOAD_DATA` parameter. The process involves either loading
+pre-computed spectrograms from this [dataset](https://www.kaggle.com/datasets/kadircandrisolu/birdclef25-mel-spectrograms)
+(when `LOAD_DATA=True`) or dynamically generating them (when `LOAD_DATA=False`), transforming 
+audio data into spectrogram representations, and preparing it for the neural network.
+"""
+
+
 def audio2melspec(audio_data, cfg):
     """Convert audio data to mel spectrogram"""
     if np.isnan(audio_data).any():
