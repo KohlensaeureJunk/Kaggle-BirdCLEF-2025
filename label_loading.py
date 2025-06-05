@@ -89,133 +89,6 @@ def filter_training_labels(train_df, ext_df, cfg, random_state=None):
     return result_df
 
 
-def load_training_labels(train_df, ext_df, cfg, random_state=None):
-    """
-    Compare training labels with external pseudolabels and filter based on confidence threshold.
-    """
-    if random_state is None:
-        random_state = cfg.seed
-    # Create lookup dictionaries to avoid repeated dataframe filtering
-    filename_to_primary = {}
-    filename_to_secondary = {}
-    
-    for _, row in train_df.iterrows():
-        filename = row['filename'].split('/')[-1].split('.')[0]
-        filename_to_primary[filename] = row['primary_label']
-        filename_to_secondary[filename] = row['secondary_labels']
-    
-    return_list = []
-    
-    for _, ext_row in tqdm(ext_df.iterrows(), desc="Filtering training data", total=len(ext_df)):
-        row_parts = ext_row["row_id"].split("_")
-        samplename = row_parts[0]
-        timestamp = row_parts[1]
-        
-        # Normalize predictions in one step
-        predictions = ext_row[1:]
-        #predictions = predictions / predictions.sum()
-        
-        # Get predictions above threshold with a single operation
-        passed_preds = predictions[predictions > cfg.train_label_confidence]
-        if passed_preds.empty:
-            continue
-        
-        # Sort by confidence in descending order
-        passed_preds = passed_preds.sort_values(ascending=False)
-        
-        # Get training data info via lookup
-        if samplename not in filename_to_primary:
-            continue
-        
-        primary_label = filename_to_primary[samplename]
-        secondary_labels = filename_to_secondary[samplename]
-        secondaries_filtered = []
-        
-        # Process secondary labels efficiently
-        if secondary_labels not in [[''], None, np.nan, [], "['']", "[]"]:
-            if isinstance(secondary_labels, str):
-                try:
-                    secondary_labels = eval(secondary_labels)
-                except:
-                    secondary_labels = []
-                    
-            sec_array = np.array(secondary_labels, dtype=str)
-            # Find intersection of secondary labels and passed predictions
-            secondaries_filtered = [label for label in passed_preds.index if label in sec_array]
-        
-        # Determine final primary label using the same logic as before
-        if primary_label in passed_preds.index:
-            if primary_label != passed_preds.index[0]:
-                if secondaries_filtered:
-                    primary_label = secondaries_filtered[0]
-                    secondaries_filtered = secondaries_filtered[1:]
-                #else:
-                #    primary_label = passed_preds.index[0]
-        else:
-            if secondaries_filtered:
-                primary_label = secondaries_filtered[0]
-                secondaries_filtered = secondaries_filtered[1:]
-            else:
-                continue
-        
-        return_list.append({
-            "samplename": samplename + "_" + timestamp,
-            "primary_label": primary_label,
-            "secondary_labels": str(secondaries_filtered),
-            "filename": samplename + ".ogg",
-            "filepath": os.path.join(cfg.train_datadir, samplename + ".ogg"),
-            "timestamp": timestamp,
-        })
-    result_df = pd.DataFrame(return_list)
-
-    if len(result_df) > cfg.max_train_samples:
-        if cfg.stratified_train_samples:
-            # Perform stratified sampling based on primary_label
-            print(f"Performing stratified sampling to get a maximum of {cfg.max_train_samples} samples")
-            
-            # Group by primary_label and calculate proportions
-            label_counts = result_df['primary_label'].value_counts()
-            
-            # Create visualization of label distribution
-            plt.figure(figsize=(10, max(8, len(label_counts)*0.25)))  # Dynamic height based on label count
-            plt.barh(label_counts.index, label_counts.values, color='skyblue')
-            plt.title('Distribution of Bird Species Labels')
-            plt.xlabel('Number of Samples')
-            plt.ylabel('Bird Species')
-            plt.grid(axis='x', linestyle='--', alpha=0.7)
-            plt.tight_layout()
-            # Save the plot if output directory exists in config
-            if hasattr(cfg, 'OUTPUT_DIR') and os.path.exists(cfg.OUTPUT_DIR):
-                plt.savefig(os.path.join(cfg.OUTPUT_DIR, f'plots/label_distribution_{cfg.timestamp}.png'))
-            plt.show()
-            
-            label_proportions = label_counts / len(result_df)
-            
-            # Calculate how many samples to take from each group
-            samples_per_label = {label: max(1, int(cfg.max_train_samples * prop)) for label, prop in label_proportions.items()}
-            
-            # Sample from each group
-            sampled_dfs = []
-            for label, count in samples_per_label.items():
-                group_df = result_df[result_df['primary_label'] == label]
-                if len(group_df) > count:
-                    sampled_dfs.append(group_df.sample(count, random_state=random_state))
-                else:
-                    sampled_dfs.append(group_df)
-            
-            # Combine sampled groups
-            result_df = pd.concat(sampled_dfs).reset_index(drop=True)
-        else:
-            # Simple random sampling
-            print(f"Randomly sampling {cfg.max_train_samples} samples")
-            result_df = result_df.sample(cfg.max_train_samples, random_state=random_state).reset_index(drop=True)
-    
-    # shuffle the final DataFrame
-    result_df = result_df.sample(frac=1, random_state=random_state).reset_index(drop=True)
-    print(f"Returning {len(result_df)} processed pseudolabels")
-    return result_df
-
-
 def load_pseudolabels(df, cfg, seed=None):
     """
     Load pseudolabels and sample to ensure balanced class representation.
@@ -276,32 +149,24 @@ def load_pseudolabels(df, cfg, seed=None):
         
         # Calculate target samples per label for balanced distribution
         num_unique_labels = len(label_to_samples)
-        target_per_label = max(1, int(cfg.max_pseudolabels / num_unique_labels))
+        target_per_label = cfg.max_pseudolabels // num_unique_labels
         
         print(f"Found {num_unique_labels} unique bird species in pseudolabels")
         print(f"Target ~{target_per_label} samples per species to stay under {cfg.max_pseudolabels} total")
-        
-        # Shuffle labels for randomness across folds
-        shuffled_labels = list(label_to_samples.keys())
-        random.shuffle(shuffled_labels)
-        
+
         # Sample entries for each label
         selected_samples = set()
         
-        for label in shuffled_labels:
+        for label in label_to_samples.keys():
             samples = label_to_samples[label]
             # Shuffle samples with deterministic but different seed per label
             samples_seed = random_seed + hash(label) % 10000
-            random.seed(samples_seed)
+            np.random.seed(samples_seed)
             random.shuffle(samples)
             
             # Take at most target_per_label samples
             selected = samples[:target_per_label]
             selected_samples.update(selected)
-            
-            # Stop if we've reached the max pseudolabels
-            if len(selected_samples) >= cfg.max_pseudolabels:
-                break
         
         # Filter valid_samples to only include selected samples
         valid_samples = {k: v for k, v in valid_samples.items() if k in selected_samples}
@@ -332,7 +197,6 @@ def load_soft_pseudolabels(df, cfg, seed=None):
     """
     # Can use different seeds e.g. for different folds
     random_seed = seed if seed is not None else cfg.seed
-    np.random.seed(random_seed)
 
     print(f"Found {len(df)} samples in the pseudolabels")
     if cfg.debug:
@@ -356,6 +220,6 @@ def load_soft_pseudolabels(df, cfg, seed=None):
         'secondary_labels': [df.loc[df["row_id"]==x].to_numpy()[0, 1:].astype(np.float32) for x in row_ids]
     })
     label_df['filepath'] = label_df['filename'].apply(lambda x: os.path.join(cfg.train_soundscapes, x))
-    print(f"Loaded {len(label_df)} pseudolabels")
+    print(f"Loaded {len(label_df)} soft pseudolabels")
 
     return label_df
