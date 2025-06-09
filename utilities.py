@@ -1,7 +1,7 @@
 import random, os, torch, numpy as np
 
 def collate_fn(batch):
-    """Custom collate function to handle different sized spectrograms"""
+    """Custom collate function to handle variable-length data"""
     batch = [item for item in batch if item is not None]
     if len(batch) == 0:
         return {}
@@ -19,6 +19,8 @@ def collate_fn(batch):
             shapes = [t.shape for t in result[key]]
             if len(set(str(s) for s in shapes)) == 1:
                 result[key] = torch.stack(result[key])
+        elif key == 'sample_weight' and isinstance(result[key][0], torch.Tensor):
+            result[key] = torch.stack(result[key])  # Stack sample weights as tensors
     
     return result
 

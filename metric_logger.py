@@ -92,9 +92,8 @@ class MetricLogger:
         plt.title('Training and Validation Loss')
         plt.legend()
         plt.grid(True, alpha=0.3)
-        
+        plt.show()
         plt.savefig(f'{self.cfg.plots_dir}/loss_curves_{self.cfg.timestamp}.png')
-        plt.close()
     
     def _plot_auc_curves(self):
         """Plot training and validation AUC curves for all folds"""
@@ -131,9 +130,8 @@ class MetricLogger:
         plt.title('Training and Validation AUC')
         plt.legend()
         plt.grid(True, alpha=0.3)
-        
+        plt.show()
         plt.savefig(f'{self.cfg.plots_dir}/auc_curves_{self.cfg.timestamp}.png')
-        plt.close()
     
     def _plot_roc_curves(self):
         """Plot ROC curves for best epoch of each fold"""
@@ -222,6 +220,5 @@ class MetricLogger:
         plt.title('ROC Curves for Best Epochs')
         plt.legend(loc="lower right")
         plt.grid(True, alpha=0.3)
-        
+        plt.show()
         plt.savefig(f'{self.cfg.plots_dir}/roc_curves_{self.cfg.timestamp}.png')
-        plt.close()

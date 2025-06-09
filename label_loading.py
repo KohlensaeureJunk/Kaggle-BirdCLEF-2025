@@ -9,14 +9,25 @@ from tqdm import tqdm
 def filter_training_labels(train_df, ext_df, cfg, random_state=None):
     """
     Filter training labels by selecting the 5-second segment with highest confidence for each file.
+    For rare labels, include all segments that pass the threshold.
     
     For each entry in train_df:
     1. Find all corresponding 5-second samples in ext_df
-    2. Select the one with highest probability for the primary label
-    3. Keep secondary labels only if they have sufficient probability in the chosen 5s segment
+    2. For common labels: Select the one with highest probability for the primary label
+    3. For rare labels: Include all segments above threshold
+    4. Keep secondary labels only if they have sufficient probability in the chosen 5s segment(s)
+    5. Swap primary/secondary labels if a secondary has higher confidence
     """
     if random_state is None: 
         random_state = cfg.seed
+    
+    # Calculate label frequencies to identify rare labels
+    label_counts = train_df['primary_label'].value_counts()
+    rare_threshold = cfg.rare_label_threshold #Default threshold for rare labels
+    min_confidence_rare = cfg.min_confidence_rare  # Minimum confidence for rare label segments
+    rare_labels = set(label_counts[label_counts <= rare_threshold].index)
+    
+    print(f"Identified {len(rare_labels)} rare labels (≤{rare_threshold} samples)")
     
     # Group ext_df by samplename (filename without extension)
     ext_df['samplename'] = ext_df['row_id'].apply(lambda x: x.split('_')[0])
@@ -25,10 +36,12 @@ def filter_training_labels(train_df, ext_df, cfg, random_state=None):
     ext_grouped = ext_df.groupby('samplename')
     
     return_list = []
+    label_swaps_count = 0
     
     for _, train_row in tqdm(train_df.iterrows(), desc="Filtering training data", total=len(train_df)):
         # Extract samplename from the full filename
         samplename = train_row['filename'].split('/')[-1].split('.')[0]
+        filepath = os.path.join(cfg.train_datadir, train_row['filename'])
         
         # Get primary label and secondary labels
         primary_label = train_row['primary_label']
@@ -46,46 +59,134 @@ def filter_training_labels(train_df, ext_df, cfg, random_state=None):
                 
         # Skip if no corresponding entries in ext_df
         if samplename not in ext_grouped.groups:
-            print(f"Warning: {samplename} not found in external dataframe, instead applying exisiting labels")
+            print(f"Warning: {samplename} not found in external dataframe, instead applying existing labels")
             timestamp = "5" # first 5 second always exist
             retained_secondaries = secondary_labels
+            
+            # Add the entry
+            return_list.append({
+                "samplename": samplename + "_" + timestamp,
+                "primary_label": primary_label,
+                "secondary_labels": str(retained_secondaries),
+                "filename": samplename + ".ogg",
+                "filepath": filepath, 
+                "timestamp": int(timestamp),
+            })
         else:
             # Get all 5-second segments for this sample
             segments = ext_grouped.get_group(samplename)
-                
-            # Find segment with highest probability for primary label
-            segments_with_probs = segments.copy()
-            segments_with_probs['primary_prob'] = segments_with_probs[primary_label]
-            best_segment = segments_with_probs.loc[segments_with_probs['primary_prob'].idxmax()]
             
-            # Skip if confidence for primary label is too low
-            if best_segment['primary_prob'] < cfg.train_label_confidence:
-                continue
+            # Check if this is a rare label
+            if primary_label in rare_labels:
+                # For rare labels: include all segments above threshold
+                segments_with_probs = segments.copy()
+                segments_with_probs['primary_prob'] = segments_with_probs[primary_label]
                 
-            # Filter secondary labels based on their confidence in the best segment
-            retained_secondaries = []
-            for sec_label in secondary_labels:
-                if sec_label in segments.columns[1:] and best_segment[sec_label] >= cfg.secondary_label_confidence:
-                    retained_secondaries.append(sec_label)
-            
-            # Extract timestamp from row_id
-            timestamp = best_segment['row_id'].split('_')[1]
-        
-        # Add the filtered entry to our results
-        return_list.append({
-            "samplename": samplename + "_" + timestamp,
-            "primary_label": primary_label,
-            "secondary_labels": str(retained_secondaries),
-            "filename": samplename + ".ogg",
-            "filepath": os.path.join(cfg.train_datadir, samplename + ".ogg"),
-            "timestamp": timestamp,
-        })
+                # Filter segments that pass the threshold
+                valid_segments = segments_with_probs[
+                    segments_with_probs['primary_prob'] >= min_confidence_rare
+                ]
+                
+                if len(valid_segments) == 0:
+                    # If no segments pass threshold, skip this sample
+                    print(f"Warning: No segments for rare label {primary_label} pass threshold {min_confidence_rare}")
+                    continue
+                    
+                # Process all valid segments
+                for _, segment in valid_segments.iterrows():
+                    # Get confidences for all relevant labels
+                    final_primary = primary_label
+                    retained_secondaries = []
+                    primary_conf = segment[primary_label]
+                    
+                    # Check if any secondary label has higher confidence than primary
+                    max_secondary_conf = 0
+                    max_secondary_label = None
+                    
+                    for sec_label in secondary_labels:
+                        if sec_label in segments.columns[1:]:
+                            sec_conf = segment[sec_label]
+                            if sec_conf >= cfg.secondary_label_confidence:
+                                if sec_conf > primary_conf and sec_conf > max_secondary_conf:
+                                    max_secondary_conf = sec_conf
+                                    max_secondary_label = sec_label
+                                else:
+                                    retained_secondaries.append(sec_label)
+                    
+                    # Perform label swap if necessary
+                    if max_secondary_label is not None:
+                        retained_secondaries.append(final_primary)  # Old primary becomes secondary
+                        final_primary = max_secondary_label  # Secondary becomes primary
+                        label_swaps_count += 1
+                    
+                    # Extract timestamp from row_id
+                    timestamp = segment['row_id'].split('_')[1]
+                    
+                    # Add this segment to results
+                    return_list.append({
+                        "samplename": samplename + "_" + timestamp,
+                        "primary_label": final_primary,
+                        "secondary_labels": str(retained_secondaries),
+                        "filename": samplename + ".ogg",
+                        "filepath": filepath,
+                        "timestamp": int(timestamp),
+                    })
+                    
+            else:
+                # For common labels: use original logic (best segment only)
+                segments_with_probs = segments.copy()
+                segments_with_probs['primary_prob'] = segments_with_probs[primary_label]
+                best_segment = segments_with_probs.loc[segments_with_probs['primary_prob'].idxmax()]
+                
+                # Skip if confidence for primary label is too low
+                if best_segment['primary_prob'] < cfg.train_label_confidence:
+                    continue
+                
+                # Get confidences for all relevant labels
+                final_primary = primary_label
+                retained_secondaries = []
+                primary_conf = best_segment[primary_label]
+                
+                # Check if any secondary label has higher confidence than primary
+                max_secondary_conf = 0
+                max_secondary_label = None
+                
+                for sec_label in secondary_labels:
+                    if sec_label in segments.columns[1:]:
+                        sec_conf = best_segment[sec_label]
+                        if sec_conf >= cfg.secondary_label_confidence:
+                            if sec_conf > primary_conf and sec_conf > max_secondary_conf:
+                                max_secondary_conf = sec_conf
+                                max_secondary_label = sec_label
+                            else:
+                                retained_secondaries.append(sec_label)
+                
+                # Perform label swap if necessary
+                if max_secondary_label is not None:
+                    retained_secondaries.append(final_primary)  # Old primary becomes secondary
+                    final_primary = max_secondary_label  # Secondary becomes primary
+                    label_swaps_count += 1
+                
+                # Extract timestamp from row_id
+                timestamp = best_segment['row_id'].split('_')[1]
+                
+                # Add the filtered entry to our results
+                return_list.append({
+                    "samplename": samplename + "_" + timestamp,
+                    "primary_label": final_primary,
+                    "secondary_labels": str(retained_secondaries),
+                    "filename": samplename + ".ogg",
+                    "filepath": filepath,
+                    "timestamp": int(timestamp),
+                })
     
     result_df = pd.DataFrame(return_list)
 
     # shuffle the final DataFrame
     result_df = result_df.sample(frac=1, random_state=random_state).reset_index(drop=True)
     print(f"Returning {len(result_df)} processed filtered labels")
+    if label_swaps_count > 0:
+        print(f"Performed {label_swaps_count} primary/secondary label swaps based on confidence scores")
     return result_df
 
 

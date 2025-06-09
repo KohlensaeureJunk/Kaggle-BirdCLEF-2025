@@ -36,11 +36,16 @@ def audio2melspec(audio_data, cfg):
     
     return mel_spec_norm
 
-def process_audio_file(audio_path, cfg):
-    """Process a single audio file to get the mel spectrogram"""
+def process_audio_file(audio_path, cfg, timestamp=None):
+    """Process a single audio file to get the mel spectrogram
+    
+    Args:
+        audio_path: Path to the audio file
+        cfg: Configuration object
+        timestamp: Optional timestamp (5, 10, 15, etc.) indicating which 5-second window to extract
+    """
     try:
         audio_data, _ = librosa.load(audio_path, sr=cfg.FS)
-
         target_samples = int(cfg.TARGET_DURATION * cfg.FS)
 
         if len(audio_data) < target_samples:
@@ -48,17 +53,35 @@ def process_audio_file(audio_path, cfg):
             if n_copy > 1:
                 audio_data = np.concatenate([audio_data] * n_copy)
 
-        # Extract center 5 seconds
-        start_idx = max(0, int(len(audio_data) / 2 - target_samples / 2))
-        end_idx = min(len(audio_data), start_idx + target_samples)
-        center_audio = audio_data[start_idx:end_idx]
+        # Extract audio segment based on timestamp
+        if timestamp is not None:
+            # Calculate start time in seconds (timestamp represents the end of the 5-second window)
+            start_time_seconds = max(0, timestamp - cfg.TARGET_DURATION)
+            start_idx = int(start_time_seconds * cfg.FS)
+            end_idx = min(len(audio_data), start_idx + target_samples)
+            
+            # Extract the specific 5-second window
+            windowed_audio = audio_data[start_idx:end_idx]
+            
+            # Pad if necessary (shouldn't happen with proper timestamps but safety check)
+            if len(windowed_audio) < target_samples:
+                windowed_audio = np.pad(windowed_audio, 
+                                      (0, target_samples - len(windowed_audio)), 
+                                      mode='constant')
+            audio_segment = windowed_audio
+        else:
+            # Extract center 5 seconds (original behavior for regular training data)
+            start_idx = max(0, int(len(audio_data) / 2 - target_samples / 2))
+            end_idx = min(len(audio_data), start_idx + target_samples)
+            center_audio = audio_data[start_idx:end_idx]
 
-        if len(center_audio) < target_samples:
-            center_audio = np.pad(center_audio, 
-                                 (0, target_samples - len(center_audio)), 
-                                 mode='constant')
+            if len(center_audio) < target_samples:
+                center_audio = np.pad(center_audio, 
+                                     (0, target_samples - len(center_audio)), 
+                                     mode='constant')
+            audio_segment = center_audio
 
-        mel_spec = audio2melspec(center_audio, cfg)
+        mel_spec = audio2melspec(audio_segment, cfg)
         
         if mel_spec.shape != cfg.TARGET_SHAPE:
             mel_spec = cv2.resize(mel_spec, cfg.TARGET_SHAPE, interpolation=cv2.INTER_LINEAR)
@@ -84,8 +107,9 @@ def generate_spectrograms(df, cfg):
         try:
             samplename = row['samplename']
             filepath = row['filepath']
+            timestamp = row.get('timestamp', None)  # Get timestamp if available
             
-            mel_spec = process_audio_file(filepath, cfg)
+            mel_spec = process_audio_file(filepath, cfg, timestamp=timestamp)
             
             if mel_spec is not None:
                 all_bird_data[samplename] = mel_spec
