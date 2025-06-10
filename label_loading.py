@@ -2,7 +2,6 @@ import numpy as np
 import pandas as pd
 import random
 import os
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 
@@ -87,7 +86,7 @@ def filter_training_labels(train_df, ext_df, cfg, random_state=None):
                     segments_with_probs['primary_prob'] >= min_confidence_rare
                 ]
                 
-                if len(valid_segments) == 0:
+                if len(valid_segments) == 0 and not cfg.debug:
                     # If no segments pass threshold, skip this sample
                     print(f"Warning: No segments for rare label {primary_label} pass threshold {min_confidence_rare}")
                     continue
@@ -199,7 +198,7 @@ def load_pseudolabels(df, cfg, seed=None):
     np.random.seed(random_seed)
     
     if cfg.debug:
-        df = df.sample(min(1000, len(df)), random_state=random_seed).reset_index(drop=True)
+        df = df.sample(min(100, len(df)), random_state=random_seed).reset_index(drop=True)
     
     label_cols = df.columns[1:]
     
@@ -301,7 +300,7 @@ def load_soft_pseudolabels(df, cfg, seed=None):
 
     print(f"Found {len(df)} samples in the pseudolabels")
     if cfg.debug:
-        df = df.sample(min(1000, len(df)), random_state=random_seed).reset_index(drop=True)
+        df = df.sample(min(100, len(df)), random_state=random_seed).reset_index(drop=True)
     
     label_col = df.columns[1:]
     

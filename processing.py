@@ -101,8 +101,6 @@ def generate_spectrograms(df, cfg):
     errors = []
 
     for i, row in tqdm(df.iterrows(), total=len(df)):
-        if cfg.debug and i >= 1000:
-            break
         
         try:
             samplename = row['samplename']
